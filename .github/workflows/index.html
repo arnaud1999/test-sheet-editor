@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fiche modifiable - Google Sheet</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+    <style>
+        .toast { position: fixed; bottom: 20px; right: 20px; background: #1f2937; color: white; padding: 10px 18px; border-radius: 40px; z-index: 1000; opacity: 0; transition: 0.2s; pointer-events: none; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4">
+    <div class="max-w-3xl w-full bg-white rounded-2xl shadow-xl p-6">
+        <div class="text-center mb-6">
+            <i class="fas fa-cloud-upload-alt text-blue-500 text-4xl"></i>
+            <h1 class="text-2xl font-bold">📘 Modifier mes informations</h1>
+            <p class="text-gray-500">Connexion par nom + ID • Enregistrement manuel (bouton)</p>
+        </div>
+
+        <!-- Étape 1 : Connexion -->
+        <div id="loginBox" class="space-y-4">
+            <div class="bg-green-100 p-2 rounded text-sm"><span id="recordCount"></span> utilisateurs enregistrés</div>
+            <input type="text" id="loginName" placeholder="Nom (colonne Name)" class="w-full border rounded-lg p-2">
+            <input type="text" id="loginId" placeholder="ID (colonne ID)" class="w-full border rounded-lg p-2">
+            <button id="doLoginBtn" class="bg-indigo-600 text-white w-full py-2 rounded-lg">Accéder à mes données</button>
+            <div id="loginError" class="text-red-600 text-sm hidden"></div>
+        </div>
+
+        <!-- Étape 2 : Édition -->
+        <div id="editBox" class="hidden">
+            <div class="flex justify-between items-center border-b pb-2 mb-3 flex-wrap gap-2">
+                <h2 class="text-xl font-bold"><span id="userNameDisplay"></span></h2>
+                <div class="flex gap-2">
+                    <button id="saveBtn" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 rounded-lg text-sm"><i class="fas fa-save mr-1"></i> Enregistrer</button>
+                    <button id="logoutBtn" class="bg-gray-200 hover:bg-gray-300 px-4 py-1.5 rounded-lg text-sm">Déconnexion</button>
+                </div>
+            </div>
+            <div id="dynamicForm" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+            <div class="mt-4 text-xs text-gray-400">✏️ Modifiez vos champs, puis cliquez sur "Enregistrer" pour mettre à jour le Google Sheet.</div>
+        </div>
+    </div>
+    <div id="toast" class="toast"></div>
+
+    <script>
+        // ************* À MODIFIER PAR L'ADMIN *************
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzVRnMRQqKjad2PDlYAchHLKvA_5x9VRQ7fUp7f8bVd5QQXBQip-FQzgPBwHs___YtY/exec";   // <-- REMPLACEZ PAR L'URL OBTENUE LORS DU DÉPLOIEMENT
+        // ************************************************
+
+        let headers = [];
+        let rowsData = [];
+        let currentRowIndex = -1;
+        let editedFields = {};  // stocke les modifications avant enregistrement
+
+        const loginBox = document.getElementById('loginBox');
+        const editBox = document.getElementById('editBox');
+        const doLoginBtn = document.getElementById('doLoginBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const saveBtn = document.getElementById('saveBtn');
+        const recordCountSpan = document.getElementById('recordCount');
+        const loginErrorSpan = document.getElementById('loginError');
+        const userNameSpan = document.getElementById('userNameDisplay');
+        const dynamicFormDiv = document.getElementById('dynamicForm');
+
+        function showToast(msg, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.style.backgroundColor = isError ? '#b91c1c' : '#1f2937';
+            toast.style.opacity = '1';
+            setTimeout(() => toast.style.opacity = '0', 3000);
+        }
+
+        async function loadFromSheet() {
+            if (!WEB_APP_URL || WEB_APP_URL === "URL_DU_WEB_APP") {
+                showToast("L'administrateur n'a pas configuré l'URL du script.", true);
+                return false;
+            }
+            try {
+                const res = await fetch(`${WEB_APP_URL}?action=load`);
+                const json = await res.json();
+                if (json.error) throw new Error(json.error);
+                headers = json.headers;
+                rowsData = json.data;
+                if (!headers.some(h => h.toLowerCase() === 'name') || !headers.some(h => h.toLowerCase() === 'id')) {
+                    throw new Error("Le sheet doit contenir les colonnes 'Name' et 'ID'");
+                }
+                recordCountSpan.innerText = rowsData.length;
+                showToast(`✅ Données chargées (${rowsData.length} utilisateurs)`, false);
+                return true;
+            } catch (err) {
+                showToast(`Erreur chargement : ${err.message}`, true);
+                return false;
+            }
+        }
+
+        async function saveCurrentRowToSheet() {
+            if (currentRowIndex === -1) return;
+            // Appliquer les modifications locales à rowsData
+            for (let [header, newValue] of Object.entries(editedFields)) {
+                rowsData[currentRowIndex][header] = newValue;
+            }
+            try {
+                const params = new URLSearchParams();
+                params.append('action', 'updateRow');
+                params.append('rowIndex', currentRowIndex);
+                params.append('rowData', JSON.stringify(rowsData[currentRowIndex]));
+                const res = await fetch(WEB_APP_URL, { method: 'POST', body: params });
+                const result = await res.json();
+                if (result.success) {
+                    showToast("💾 Données enregistrées dans Google Sheet", false);
+                    editedFields = {};   // vider les modifs non sauvegardées
+                } else {
+                    throw new Error(result.error);
+                }
+            } catch (err) {
+                showToast(`Erreur enregistrement : ${err.message}`, true);
+            }
+        }
+
+        // Met à jour l'objet editedFields quand l'utilisateur modifie un champ
+        function onFieldEdit(header, newValue) {
+            editedFields[header] = newValue;
+        }
+
+        function renderEditForm() {
+            const userRow = rowsData[currentRowIndex];
+            dynamicFormDiv.innerHTML = '';
+            const nameHeader = headers.find(h => h.toLowerCase() === 'name');
+            const idHeader = headers.find(h => h.toLowerCase() === 'id');
+            for (let h of headers) {
+                const isReadOnly = (h === nameHeader || h === idHeader);
+                const originalValue = (userRow[h] !== undefined && userRow[h] !== null) ? userRow[h] : '';
+                // Si champ modifié non encore enregistré, afficher la nouvelle valeur
+                const displayValue = (editedFields[h] !== undefined) ? editedFields[h] : originalValue;
+                const div = document.createElement('div');
+                div.className = "border rounded-lg p-3 bg-gray-50";
+                div.innerHTML = `
+                    <label class="block text-xs font-bold uppercase text-gray-600">${h} ${isReadOnly ? '🔒' : ''}</label>
+                    <input type="text" class="w-full mt-1 p-2 border rounded ${isReadOnly ? 'bg-gray-100' : 'bg-white'}" value="${escapeHtml(String(displayValue))}" ${isReadOnly ? 'readonly disabled' : ''}>
+                `;
+                dynamicFormDiv.appendChild(div);
+                if (!isReadOnly) {
+                    const input = div.querySelector('input');
+                    input.addEventListener('input', (e) => onFieldEdit(h, e.target.value));
+                }
+            }
+        }
+
+        function escapeHtml(str) { return str.replace(/[&<>]/g, m => m === '&' ? '&amp;' : m === '<' ? '&lt;' : '&gt;'); }
+
+        function authenticate(name, id) {
+            const nameHeader = headers.find(h => h.toLowerCase() === 'name');
+            const idHeader = headers.find(h => h.toLowerCase() === 'id');
+            const idx = rowsData.findIndex(row => String(row[nameHeader]).trim() === name.trim() && String(row[idHeader]).trim() === id.trim());
+            if (idx === -1) {
+                loginErrorSpan.classList.remove('hidden');
+                loginErrorSpan.innerText = "Nom ou ID incorrect";
+                return false;
+            }
+            loginErrorSpan.classList.add('hidden');
+            currentRowIndex = idx;
+            editedFields = {};   // reset des modifications
+            userNameSpan.innerText = name;
+            renderEditForm();
+            loginBox.classList.add('hidden');
+            editBox.classList.remove('hidden');
+            return true;
+        }
+
+        function logout() {
+            currentRowIndex = -1;
+            editedFields = {};
+            editBox.classList.add('hidden');
+            loginBox.classList.remove('hidden');
+            document.getElementById('loginName').value = '';
+            document.getElementById('loginId').value = '';
+            showToast("Déconnecté", false);
+        }
+
+        // Chargement initial
+        window.onload = async () => {
+            const ok = await loadFromSheet();
+            if (!ok && WEB_APP_URL !== "URL_DU_WEB_APP") {
+                showToast("Vérifiez l'URL du script ou votre connexion internet", true);
+            }
+        };
+        doLoginBtn.onclick = () => {
+            const name = document.getElementById('loginName').value.trim();
+            const id = document.getElementById('loginId').value.trim();
+            if (!name || !id) { loginErrorSpan.classList.remove('hidden'); loginErrorSpan.innerText = "Veuillez remplir les deux champs"; return; }
+            authenticate(name, id);
+        };
+        logoutBtn.onclick = logout;
+        saveBtn.onclick = () => {
+            if (currentRowIndex === -1) return;
+            if (Object.keys(editedFields).length === 0) {
+                showToast("Aucune modification à enregistrer.", false);
+                return;
+            }
+            saveCurrentRowToSheet();
+        };
+    </script>
+</body>
+</html>
